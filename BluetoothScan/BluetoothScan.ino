@@ -31,6 +31,100 @@ static const int   PAUSE_BETWEEN_SCANS_MS = 2000;
 
 BLEScan* pBLEScan = nullptr;
 
+// Retourne le nom du fabricant à partir de l'identifiant de société
+// Bluetooth SIG (les 2 premiers octets des données fabricant, en
+// little-endian). Liste des principaux fabricants ; les autres sont
+// affichés sous forme de code hexadécimal.
+// Référence complète : https://www.bluetooth.com/specifications/assigned-numbers/
+static const char* companyName(uint16_t companyId) {
+  switch (companyId) {
+    case 0x004C: return "Apple";
+    case 0x0006: return "Microsoft";
+    case 0x00E0: return "Google";
+    case 0x0075: return "Samsung";
+    case 0x0087: return "Garmin";
+    case 0x0157: return "Huami (Amazfit/Xiaomi)";
+    case 0x038F: return "Xiaomi";
+    case 0x0499: return "Ruuvi";
+    case 0x0059: return "Nordic Semiconductor";
+    case 0x02E5: return "Espressif";
+    case 0x004F: return "Logitech";
+    case 0x000F: return "Broadcom";
+    case 0x0001: return "Ericsson";
+    case 0x000D: return "Texas Instruments";
+    case 0x0078: return "Nike";
+    case 0x0171: return "Amazon";
+    case 0x0110: return "Sony";
+    case 0x00C4: return "LG Electronics";
+    case 0x0131: return "Cypress";
+    default:     return nullptr;
+  }
+}
+
+// Affiche un tableau d'octets sous forme hexadécimale (ex. "4C 00 02 15").
+static void printHex(const uint8_t* data, size_t length) {
+  for (size_t i = 0; i < length; i++) {
+    if (data[i] < 0x10) {
+      Serial.print('0');
+    }
+    Serial.print(data[i], HEX);
+    if (i + 1 < length) {
+      Serial.print(' ');
+    }
+  }
+}
+
+// Affiche les octets imprimables sous forme de texte ('.' pour les autres).
+static void printAscii(const uint8_t* data, size_t length) {
+  for (size_t i = 0; i < length; i++) {
+    char c = (char)data[i];
+    Serial.print((c >= 0x20 && c <= 0x7E) ? c : '.');
+  }
+}
+
+// Décode et affiche les données fabricant : nom du fabricant si connu,
+// puis les octets restants en hexadécimal et en texte lisible.
+static void printManufacturerData(const std::string& data) {
+  const uint8_t* bytes = (const uint8_t*)data.data();
+  size_t length = data.length();
+
+  Serial.print(" | Fabricant: ");
+
+  if (length >= 2) {
+    uint16_t companyId = (uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8);
+    const char* name = companyName(companyId);
+
+    if (name != nullptr) {
+      Serial.print(name);
+    } else {
+      Serial.print("code 0x");
+      if (companyId < 0x1000) Serial.print('0');
+      if (companyId < 0x0100) Serial.print('0');
+      if (companyId < 0x0010) Serial.print('0');
+      Serial.print(companyId, HEX);
+    }
+
+    // Cas particulier : iBeacon Apple (0x02 0x15 après l'ID société).
+    if (companyId == 0x004C && length >= 4 && bytes[2] == 0x02 && bytes[3] == 0x15) {
+      Serial.print(" (iBeacon)");
+    }
+
+    // Octets restants après l'identifiant de société.
+    if (length > 2) {
+      Serial.print(" [hex: ");
+      printHex(bytes + 2, length - 2);
+      Serial.print(" | txt: ");
+      printAscii(bytes + 2, length - 2);
+      Serial.print("]");
+    }
+  } else {
+    // Données trop courtes pour contenir un identifiant de société.
+    Serial.print("[hex: ");
+    printHex(bytes, length);
+    Serial.print("]");
+  }
+}
+
 // Callback appelé pour chaque périphérique détecté pendant le scan.
 class ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice advertisedDevice) override {
@@ -53,9 +147,7 @@ class ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
     }
 
     if (advertisedDevice.haveManufacturerData()) {
-      Serial.print(" | Fabricant: ");
-      Serial.print(advertisedDevice.getManufacturerData().length());
-      Serial.print(" octet(s)");
+      printManufacturerData(advertisedDevice.getManufacturerData());
     }
 
     Serial.println();

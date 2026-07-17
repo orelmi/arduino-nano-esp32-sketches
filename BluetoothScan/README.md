@@ -33,7 +33,7 @@ Initialisation de la pile BLE...
 Initialisation terminée.
 
 Scan en cours (5 s)...
-  -> Adresse: aa:bb:cc:dd:ee:ff | RSSI: -67 dBm | Nom: Mi Band 6
+  -> Adresse: aa:bb:cc:dd:ee:ff | RSSI: -67 dBm | Nom: Mi Band 6 | Fabricant: Apple [hex: 02 15 ... | txt: ..]
   -> Adresse: 11:22:33:44:55:66 | RSSI: -80 dBm | Service UUID: 0000fe9f-0000-1000-8000-00805f9b34fb
 Scan terminé : 2 périphérique(s) trouvé(s).
 --------------------------------------------------
@@ -45,7 +45,22 @@ Scan terminé : 2 périphérique(s) trouvé(s).
 - **RSSI** : puissance du signal reçu (en dBm ; plus proche de 0 = plus proche).
 - **Nom** : nom diffusé (si présent).
 - **Service UUID** : UUID de service annoncé (si présent).
-- **Fabricant** : taille des données fabricant (si présentes).
+- **Fabricant** : nom du fabricant décodé depuis l'identifiant de société
+  Bluetooth SIG (2 premiers octets, little-endian). Suivi des octets restants
+  en **hexadécimal** (`hex:`) et en **texte lisible** (`txt:`, les octets non
+  imprimables sont remplacés par `.`). Les iBeacon Apple sont signalés.
+
+### Décodage des données fabricant
+
+Les données fabricant BLE commencent par un **identifiant de société** de
+2 octets attribué par le Bluetooth SIG. Le sketch connaît les principaux
+fabricants (Apple, Google, Samsung, Microsoft, Xiaomi, Garmin, Espressif…) ;
+pour les autres, l'identifiant est affiché sous forme `code 0xXXXX`. La liste
+officielle complète est disponible ici :
+<https://www.bluetooth.com/specifications/assigned-numbers/>
+
+Pour ajouter un fabricant, complétez la fonction `companyName()` dans
+`BluetoothScan.ino`.
 
 ## Réglages
 
