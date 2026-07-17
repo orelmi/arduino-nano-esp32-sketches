@@ -16,10 +16,12 @@ leur distance à partir du RSSI.
 ## Installation
 
 1. Dans l'IDE Arduino, installer le paquet de cartes **esp32** d'Espressif
-   (Gestionnaire de cartes → rechercher « esp32 »). La bibliothèque
-   *ESP32 BLE Arduino* est incluse.
-2. Sélectionner la carte **Arduino Nano ESP32**.
-3. Téléverser le sketch `BluetoothScan.ino`.
+   (Gestionnaire de cartes → rechercher « esp32 »). Les bibliothèques
+   *ESP32 BLE Arduino* et *WiFi* sont incluses.
+2. Installer la bibliothèque **PubSubClient** (Nick O'Leary) via le
+   Gestionnaire de bibliothèques (nécessaire pour MQTT).
+3. Sélectionner la carte **Arduino Nano ESP32**.
+4. Téléverser le sketch `BluetoothScan.ino`.
 
 ## Utilisation
 
@@ -44,6 +46,10 @@ un suivi clair même si le moniteur série n'affiche pas la frappe.
 | `clear`         | Vide la liste des périphériques.                                   |
 | `identify`      | Passe en mode identification (jumelage iPhone). Alias : `pair`.    |
 | `stop`          | Quitte le mode identification, revient au mode scan.               |
+| `wifi <ssid> <mdp>` | Connecte le WiFi. Sans argument : affiche l'état et l'IP.      |
+| `mqtt <host> [port]` | Configure et connecte le broker MQTT (port 1883 par défaut). |
+| `topic [nom]`   | Change le topic de publication (défaut : nom de la carte).         |
+| `pub`           | Lance un scan et publie la liste des devices en JSON sur MQTT.     |
 
 ## Exemple de session
 
@@ -121,6 +127,69 @@ via `#define DEVICE_NAME`.
 > c'est plus simple et ça suffit pour « s'identifier ». Le bonding chiffré est
 > possible mais plus lourd — demandez si vous le voulez.
 
+## Publication MQTT (via WiFi)
+
+La carte peut se connecter à un WiFi puis publier le résultat d'un scan BLE
+sur un **broker MQTT** (port **1883**, sans TLS).
+
+### Étapes
+
+```
+BLE> wifi MonReseau motdepasse
+  WiFi connecte. IP : 192.168.1.42 | RSSI : -58 dBm
+
+BLE> mqtt 192.168.1.10 1883
+  MQTT connecte.
+
+BLE> topic capteurs/nano-esp32      (optionnel ; défaut : NanoESP32-ID)
+
+BLE> pub
+Scan en cours (5 s)...
+Publication sur le topic "capteurs/nano-esp32" (312 octets)...
+  Publie avec succes.
+```
+
+- `wifi <ssid> <mdp>` : le mot de passe peut contenir des espaces ; en revanche
+  le SSID ne doit pas en contenir (limite du parseur de commandes).
+- `mqtt <host> [port]` : `host` = IP ou nom d'hôte du broker (ex. `test.mosquitto.org`).
+- Le **topic** par défaut est le nom de la carte (`NanoESP32-ID`), modifiable
+  avec `topic`.
+
+### Format du message publié (JSON)
+
+```json
+{
+  "board": "NanoESP32-ID",
+  "count": 2,
+  "devices": [
+    { "address": "e7:63:26:3f:5a:e4", "rssi": -55, "distance_cm": 35,
+      "name": "JBL Tune 520BT-LE" },
+    { "address": "aa:bb:cc:dd:ee:ff", "rssi": -70, "distance_cm": 178,
+      "name": "", "manufacturer": "Apple (iBeacon) [hex: ... | txt: ..]" }
+  ]
+}
+```
+
+`distance_cm` vaut `null` si l'estimation n'est pas possible. Le message est
+publié en flux (`beginPublish`/`endPublish`), donc sa taille n'est pas limitée
+par le buffer interne de PubSubClient.
+
+### Vérifier la réception (côté ordinateur)
+
+Avec les outils Mosquitto :
+
+```bash
+mosquitto_sub -h 192.168.1.10 -p 1883 -t "NanoESP32-ID" -v
+```
+
+> ⚠️ **Sécurité** : le port 1883 est **en clair, sans authentification**. À
+> réserver à un réseau de confiance / des tests. Pour Internet, préférez un
+> broker avec TLS (port 8883) et identifiants — je peux l'ajouter au besoin.
+
+> Note : sur l'ESP32-S3, le WiFi et le BLE partagent la même radio 2,4 GHz
+> (coexistence). Tout fonctionne, mais un scan pendant une activité WiFi
+> intense peut être légèrement moins rapide.
+
 ## Informations affichées par périphérique
 
 - **Adresse** : adresse MAC BLE du périphérique.
@@ -175,4 +244,5 @@ commandes) :
 - `g_rssiAt1m` / `g_pathLoss` : calibration distance — cf. `calib`.
 - `MAX_DEVICES` : nombre maximum d'appareils mémorisés par scan (défaut : 64).
 - `MON_CODE` : code secret d'identification (défaut : `aurelien`).
-- `DEVICE_NAME` : nom BLE annoncé en mode identification (défaut : `NanoESP32-ID`).
+- `DEVICE_NAME` : nom BLE annoncé + topic MQTT par défaut (`NanoESP32-ID`).
+- `g_mqttPort` : port MQTT (défaut : `1883`, sans TLS) — cf. `mqtt`.

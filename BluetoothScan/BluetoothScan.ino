@@ -28,6 +28,8 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+#include <WiFi.h>
+#include <PubSubClient.h>   // Bibliothèque "PubSubClient" (Nick O'Leary) - à installer
 #include <math.h>
 
 // ---------------------------------------------------------------------------
@@ -74,6 +76,14 @@ static BLEServer*         g_server     = nullptr;
 static BLECharacteristic* g_statusChar = nullptr;
 static bool g_identifyMode = false;   // mode identification actif ?
 static bool g_identified   = false;   // iPhone identifié avec le bon code ?
+
+// --- WiFi + MQTT -----------------------------------------------------------
+static WiFiClient   g_wifiClient;
+static PubSubClient g_mqtt(g_wifiClient);
+
+static String   g_mqttHost  = "";           // adresse du broker (vide = non configuré)
+static uint16_t g_mqttPort  = 1883;         // port MQTT (1883 = sans TLS)
+static String   g_mqttTopic = DEVICE_NAME;  // topic de publication (nom de la carte)
 
 // Déclarations anticipées (fonctions utilisées avant leur définition).
 static void printPrompt();
@@ -432,6 +442,143 @@ static void doScan(int seconds) {
   Serial.printf("Scan terminé : %d périphérique(s) détecté(s).\n", g_deviceCount);
 }
 
+// ---------------------------------------------------------------------------
+// Réseau : WiFi + publication MQTT du résultat de scan.
+// ---------------------------------------------------------------------------
+
+// Échappe une chaîne pour l'inclure dans du JSON.
+static String jsonEscape(const String& s) {
+  String out;
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c == '"' || c == '\\') { out += '\\'; out += c; }
+    else if (c == '\n')        { out += "\\n"; }
+    else if (c == '\r')        { out += "\\r"; }
+    else if (c == '\t')        { out += "\\t"; }
+    else if ((uint8_t)c < 0x20) { /* on ignore les autres caractères de contrôle */ }
+    else                       { out += c; }
+  }
+  return out;
+}
+
+// Construit le document JSON décrivant la liste des périphériques détectés.
+static String buildScanJson() {
+  sortDevicesByRssiDesc();
+  String j = "{\"board\":\"";
+  j += jsonEscape(g_mqttTopic);
+  j += "\",\"count\":";
+  j += g_deviceCount;
+  j += ",\"devices\":[";
+  for (int i = 0; i < g_deviceCount; i++) {
+    if (i > 0) j += ',';
+    const DeviceInfo& d = g_devices[i];
+    float cm = rssiToDistanceCm(d.rssi);
+    j += "{\"address\":\"";
+    j += jsonEscape(d.address);
+    j += "\",\"rssi\":";
+    j += d.rssi;
+    j += ",\"distance_cm\":";
+    if (cm < 0) j += "null"; else j += (int)(cm + 0.5f);
+    j += ",\"name\":\"";
+    j += jsonEscape(d.name);
+    j += "\"";
+    if (d.manufacturer.length() > 0) {
+      j += ",\"manufacturer\":\"";
+      j += jsonEscape(d.manufacturer);
+      j += "\"";
+    }
+    j += "}";
+  }
+  j += "]}";
+  return j;
+}
+
+// Connexion au réseau WiFi (bloquant, avec délai maximal).
+static void connectWifi(const String& ssid, const String& pass) {
+  Serial.printf("Connexion WiFi a \"%s\"...\n", ssid.c_str());
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid.c_str(), pass.c_str());
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+    delay(300);
+    Serial.print('.');
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("  WiFi connecte. IP : ");
+    Serial.print(WiFi.localIP());
+    Serial.print(" | RSSI : ");
+    Serial.print(WiFi.RSSI());
+    Serial.println(" dBm");
+  } else {
+    Serial.println("  Echec WiFi (verifiez le SSID et le mot de passe).");
+  }
+}
+
+// Affiche l'état WiFi.
+static void printWifiStatus() {
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("  WiFi : connecte a \"");
+    Serial.print(WiFi.SSID());
+    Serial.print("\" | IP : ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("  WiFi : non connecte. Utilisez 'wifi <ssid> <mot_de_passe>'.");
+  }
+}
+
+// (Re)connexion au broker MQTT. Renvoie true si connecté.
+static bool connectMqtt() {
+  if (g_mqttHost.length() == 0) {
+    Serial.println("  Broker non configure. Utilisez 'mqtt <host> [port]'.");
+    return false;
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("  WiFi non connecte. Utilisez 'wifi <ssid> <mot_de_passe>' d'abord.");
+    return false;
+  }
+  if (g_mqtt.connected()) return true;
+
+  g_mqtt.setServer(g_mqttHost.c_str(), g_mqttPort);
+  // Identifiant client unique dérivé de l'adresse MAC de la puce.
+  String clientId = String(DEVICE_NAME) + "-" + String((uint32_t)ESP.getEfuseMac(), HEX);
+  Serial.printf("Connexion MQTT a %s:%u (client %s)...\n",
+                g_mqttHost.c_str(), g_mqttPort, clientId.c_str());
+
+  if (g_mqtt.connect(clientId.c_str())) {
+    Serial.println("  MQTT connecte.");
+    return true;
+  }
+  Serial.printf("  Echec MQTT (code d'etat=%d). Verifiez host/port.\n", g_mqtt.state());
+  return false;
+}
+
+// Lance un scan puis publie la liste des périphériques sur le topic MQTT.
+static void publishScan() {
+  if (g_identifyMode) {
+    Serial.println("Mode identification actif. Tapez 'stop' avant de publier.");
+    return;
+  }
+  if (!connectMqtt()) return;
+
+  doScan(g_scanSeconds);              // scan frais avant publication
+  String payload = buildScanJson();
+
+  Serial.printf("Publication sur le topic \"%s\" (%u octets)...\n",
+                g_mqttTopic.c_str(), (unsigned)payload.length());
+
+  // Publication en flux (beginPublish/print/endPublish) pour ne pas être
+  // limité par la taille du buffer interne de PubSubClient.
+  bool ok = g_mqtt.beginPublish(g_mqttTopic.c_str(), payload.length(), false);
+  if (ok) {
+    g_mqtt.print(payload);
+    ok = g_mqtt.endPublish();
+  }
+  Serial.println(ok ? "  Publie avec succes." : "  Echec de la publication.");
+}
+
 // Bannière d'accueil (affichée au démarrage).
 static void printBanner() {
   Serial.println();
@@ -449,6 +596,11 @@ static void printStatus() {
   Serial.printf("  Etat : mode=%s | duree scan=%ds | auto=%s | RSSI@1m=%.0f dBm | n=%.2f | %d en memoire\n",
                 mode, g_scanSeconds, g_autoScan ? "ON" : "OFF",
                 g_rssiAt1m, g_pathLoss, g_deviceCount);
+  Serial.printf("         WiFi=%s | MQTT=%s (%s:%u) | topic=%s\n",
+                WiFi.status() == WL_CONNECTED ? "connecte" : "deconnecte",
+                g_mqtt.connected() ? "connecte" : "deconnecte",
+                g_mqttHost.length() ? g_mqttHost.c_str() : "?", g_mqttPort,
+                g_mqttTopic.c_str());
 }
 
 static void printHelp() {
@@ -469,6 +621,12 @@ static void printHelp() {
   Serial.println("  identify          Passe en peripherique BLE : l'iPhone se");
   Serial.println("                    connecte et ecrit un code pour s'identifier.");
   Serial.println("  stop              Quitte le mode identification.");
+  Serial.println("  --- Reseau WiFi + MQTT ---");
+  Serial.println("  wifi <ssid> <mdp> Connecte le WiFi. Sans arg : affiche l'etat/IP.");
+  Serial.println("  mqtt <host> [port] Configure et connecte le broker (port 1883 par");
+  Serial.println("                    defaut, sans TLS). Sans arg : affiche l'etat.");
+  Serial.println("  topic [nom]       Change le topic (defaut : nom de la carte).");
+  Serial.println("  pub               Lance un scan et publie la liste en JSON sur MQTT.");
   Serial.println();
   printStatus();
   Serial.println();
@@ -546,6 +704,30 @@ static void handleCommand(String line) {
     if (g_identifyMode) stopIdentifyMode();
     else                Serial.println("Rien a arreter.");
 
+  } else if (cmd == "wifi") {
+    if (a1.length() == 0) printWifiStatus();
+    else                  connectWifi(a1, a2);   // a2 = mot de passe (peut contenir des espaces)
+
+  } else if (cmd == "mqtt") {
+    if (a1.length() == 0) {
+      Serial.printf("  Broker : %s:%u | connecte=%s | topic=%s\n",
+                    g_mqttHost.length() ? g_mqttHost.c_str() : "(non configure)",
+                    g_mqttPort, g_mqtt.connected() ? "oui" : "non",
+                    g_mqttTopic.c_str());
+    } else {
+      g_mqttHost = a1;
+      if (a2.length() > 0) g_mqttPort = (uint16_t)a2.toInt();
+      g_mqtt.disconnect();
+      connectMqtt();
+    }
+
+  } else if (cmd == "topic") {
+    if (a1.length() == 0) { Serial.print("  Topic actuel : "); Serial.println(g_mqttTopic); }
+    else                  { g_mqttTopic = a1; Serial.print("  Topic : "); Serial.println(g_mqttTopic); }
+
+  } else if (cmd == "pub" || cmd == "publish") {
+    publishScan();
+
   } else if (cmd == "status") {
     printStatus();
 
@@ -612,6 +794,9 @@ void loop() {
   if (g_autoScan && !g_identifyMode) {
     doScan(g_scanSeconds);
     listDevices(0);
+  }
+  if (g_mqtt.connected()) {
+    g_mqtt.loop();   // entretient la connexion MQTT (keepalive)
   }
   pollSerial();
   delay(20);
