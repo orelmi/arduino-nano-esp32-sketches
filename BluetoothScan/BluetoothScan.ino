@@ -30,6 +30,7 @@
 #include <BLE2902.h>
 #include <WiFi.h>
 #include <PubSubClient.h>   // Bibliothèque "PubSubClient" (Nick O'Leary) - à installer
+#include <Preferences.h>    // Stockage non-volatile (NVS), inclus dans le core esp32
 #include <math.h>
 
 // ---------------------------------------------------------------------------
@@ -81,9 +82,15 @@ static bool g_identified   = false;   // iPhone identifié avec le bon code ?
 static WiFiClient   g_wifiClient;
 static PubSubClient g_mqtt(g_wifiClient);
 
+static String   g_wifiSsid  = "";           // identifiants WiFi mémorisés
+static String   g_wifiPass  = "";
 static String   g_mqttHost  = "";           // adresse du broker (vide = non configuré)
 static uint16_t g_mqttPort  = 1883;         // port MQTT (1883 = sans TLS)
 static String   g_mqttTopic = DEVICE_NAME;  // topic de publication (nom de la carte)
+
+// --- Persistance (mémoire non-volatile NVS) --------------------------------
+static Preferences g_prefs;
+static const char* PREFS_NS = "blescan";    // espace de noms NVS
 
 // Déclarations anticipées (fonctions utilisées avant leur définition).
 static void printPrompt();
@@ -495,6 +502,8 @@ static String buildScanJson() {
 
 // Connexion au réseau WiFi (bloquant, avec délai maximal).
 static void connectWifi(const String& ssid, const String& pass) {
+  g_wifiSsid = ssid;   // mémorise pour la persistance / reconnexion
+  g_wifiPass = pass;
   Serial.printf("Connexion WiFi a \"%s\"...\n", ssid.c_str());
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid.c_str(), pass.c_str());
@@ -555,15 +564,12 @@ static bool connectMqtt() {
   return false;
 }
 
-// Lance un scan puis publie la liste des périphériques sur le topic MQTT.
-static void publishScan() {
-  if (g_identifyMode) {
-    Serial.println("Mode identification actif. Tapez 'stop' avant de publier.");
-    return;
-  }
-  if (!connectMqtt()) return;
+// Publie la liste actuelle des périphériques (g_devices) sur le topic MQTT.
+// Ne lance PAS de scan ; (re)connecte le broker si nécessaire.
+// Renvoie true si la publication a réussi.
+static bool publishDeviceList() {
+  if (!connectMqtt()) return false;
 
-  doScan(g_scanSeconds);              // scan frais avant publication
   String payload = buildScanJson();
 
   Serial.printf("Publication sur le topic \"%s\" (%u octets)...\n",
@@ -577,6 +583,73 @@ static void publishScan() {
     ok = g_mqtt.endPublish();
   }
   Serial.println(ok ? "  Publie avec succes." : "  Echec de la publication.");
+  return ok;
+}
+
+// Commande 'pub' : lance un scan frais puis publie la liste sur MQTT.
+static void publishScan() {
+  if (g_identifyMode) {
+    Serial.println("Mode identification actif. Tapez 'stop' avant de publier.");
+    return;
+  }
+  if (!connectMqtt()) return;        // vérifie broker/WiFi avant de scanner
+  doScan(g_scanSeconds);             // scan frais avant publication
+  publishDeviceList();
+}
+
+// ---------------------------------------------------------------------------
+// Persistance de la configuration en mémoire non-volatile (NVS).
+// ---------------------------------------------------------------------------
+
+// Enregistre la configuration courante dans la NVS.
+static void saveConfig() {
+  g_prefs.begin(PREFS_NS, false);    // false = lecture/écriture
+  g_prefs.putString("ssid",   g_wifiSsid);
+  g_prefs.putString("pass",   g_wifiPass);
+  g_prefs.putString("mqhost", g_mqttHost);
+  g_prefs.putUShort("mqport", g_mqttPort);
+  g_prefs.putString("topic",  g_mqttTopic);
+  g_prefs.putInt   ("scans",  g_scanSeconds);
+  g_prefs.putFloat ("rssi1m", g_rssiAt1m);
+  g_prefs.putFloat ("ploss",  g_pathLoss);
+  g_prefs.putBool  ("auto",   g_autoScan);
+  g_prefs.end();
+  Serial.println("  Configuration enregistree.");
+}
+
+// Recharge la configuration depuis la NVS (valeurs actuelles = défauts).
+static void loadConfig() {
+  g_prefs.begin(PREFS_NS, true);     // true = lecture seule
+  g_wifiSsid    = g_prefs.getString("ssid",   g_wifiSsid);
+  g_wifiPass    = g_prefs.getString("pass",   g_wifiPass);
+  g_mqttHost    = g_prefs.getString("mqhost", g_mqttHost);
+  g_mqttPort    = g_prefs.getUShort("mqport", g_mqttPort);
+  g_mqttTopic   = g_prefs.getString("topic",  g_mqttTopic);
+  g_scanSeconds = g_prefs.getInt   ("scans",  g_scanSeconds);
+  g_rssiAt1m    = g_prefs.getFloat ("rssi1m", g_rssiAt1m);
+  g_pathLoss    = g_prefs.getFloat ("ploss",  g_pathLoss);
+  g_autoScan    = g_prefs.getBool  ("auto",   g_autoScan);
+  g_prefs.end();
+}
+
+// Efface la configuration persistée.
+static void resetConfig() {
+  g_prefs.begin(PREFS_NS, false);
+  g_prefs.clear();
+  g_prefs.end();
+  Serial.println("  Configuration effacee (effet au prochain redemarrage).");
+}
+
+// Affiche la configuration (mot de passe masqué).
+static void printConfig() {
+  Serial.println("  --- Configuration ---");
+  Serial.printf ("  WiFi SSID   : %s\n", g_wifiSsid.length() ? g_wifiSsid.c_str() : "(non defini)");
+  Serial.printf ("  WiFi pass   : %s\n", g_wifiPass.length() ? "(defini)" : "(non defini)");
+  Serial.printf ("  MQTT broker : %s:%u\n", g_mqttHost.length() ? g_mqttHost.c_str() : "(non defini)", g_mqttPort);
+  Serial.printf ("  Topic       : %s\n", g_mqttTopic.c_str());
+  Serial.printf ("  Duree scan  : %d s\n", g_scanSeconds);
+  Serial.printf ("  Calibration : RSSI@1m=%.0f dBm, n=%.2f\n", g_rssiAt1m, g_pathLoss);
+  Serial.printf ("  Auto        : %s\n", g_autoScan ? "ON" : "OFF");
 }
 
 // Bannière d'accueil (affichée au démarrage).
@@ -612,6 +685,7 @@ static void printHelp() {
   Serial.println("                    (le plus proche). Sans N : tous.");
   Serial.println("  top N             Alias de 'list N'.");
   Serial.println("  auto [s]          Scan automatique en boucle toutes les [s] s.");
+  Serial.println("                    Publie aussi sur MQTT si un broker est configure.");
   Serial.println("                    'auto 0' ou 'auto off' pour arreter.");
   Serial.println("  calib [r] [n]     Calibration distance : r = RSSI a 1 m (dBm),");
   Serial.println("                    n = exposant d'attenuation. Sans arg : affiche.");
@@ -627,6 +701,11 @@ static void printHelp() {
   Serial.println("                    defaut, sans TLS). Sans arg : affiche l'etat.");
   Serial.println("  topic [nom]       Change le topic (defaut : nom de la carte).");
   Serial.println("  pub               Lance un scan et publie la liste en JSON sur MQTT.");
+  Serial.println("  --- Configuration persistante (NVS) ---");
+  Serial.println("  config            Affiche la configuration memorisee.");
+  Serial.println("  save              Enregistre la configuration (auto apres chaque");
+  Serial.println("                    changement ; commande utile pour forcer).");
+  Serial.println("  resetcfg          Efface la configuration memorisee.");
   Serial.println();
   printStatus();
   Serial.println();
@@ -670,7 +749,7 @@ static void handleCommand(String line) {
     if (g_identifyMode) {
       Serial.println("Mode identification actif. Tapez 'stop' avant de scanner.");
     } else {
-      if (a1.length() > 0) g_scanSeconds = max(1, (int)a1.toInt());
+      if (a1.length() > 0) { g_scanSeconds = max(1, (int)a1.toInt()); saveConfig(); }
       doScan(g_scanSeconds);
       listDevices(0);
     }
@@ -685,17 +764,20 @@ static void handleCommand(String line) {
     } else if (a1 == "off" || a1 == "0") {
       g_autoScan = false;
       Serial.println("Scan automatique : OFF.");
+      saveConfig();
     } else {
       if (a1.length() > 0) g_scanSeconds = max(1, (int)a1.toInt());
       g_autoScan = true;
       Serial.printf("Scan automatique : ON (toutes les %d s). 'auto off' pour arrêter.\n",
                     g_scanSeconds);
+      saveConfig();
     }
 
   } else if (cmd == "calib") {
     if (a1.length() > 0) g_rssiAt1m = a1.toFloat();
     if (a2.length() > 0) g_pathLoss = a2.toFloat();
     Serial.printf("Calibration : RSSI@1m=%.0f dBm, n=%.2f\n", g_rssiAt1m, g_pathLoss);
+    if (a1.length() > 0 || a2.length() > 0) saveConfig();
 
   } else if (cmd == "identify" || cmd == "pair" || cmd == "id") {
     startIdentifyMode();
@@ -705,8 +787,12 @@ static void handleCommand(String line) {
     else                Serial.println("Rien a arreter.");
 
   } else if (cmd == "wifi") {
-    if (a1.length() == 0) printWifiStatus();
-    else                  connectWifi(a1, a2);   // a2 = mot de passe (peut contenir des espaces)
+    if (a1.length() == 0) {
+      printWifiStatus();
+    } else {
+      connectWifi(a1, a2);   // a2 = mot de passe (peut contenir des espaces)
+      saveConfig();
+    }
 
   } else if (cmd == "mqtt") {
     if (a1.length() == 0) {
@@ -717,16 +803,31 @@ static void handleCommand(String line) {
     } else {
       g_mqttHost = a1;
       if (a2.length() > 0) g_mqttPort = (uint16_t)a2.toInt();
+      saveConfig();
       g_mqtt.disconnect();
       connectMqtt();
     }
 
   } else if (cmd == "topic") {
-    if (a1.length() == 0) { Serial.print("  Topic actuel : "); Serial.println(g_mqttTopic); }
-    else                  { g_mqttTopic = a1; Serial.print("  Topic : "); Serial.println(g_mqttTopic); }
+    if (a1.length() == 0) {
+      Serial.print("  Topic actuel : "); Serial.println(g_mqttTopic);
+    } else {
+      g_mqttTopic = a1;
+      Serial.print("  Topic : "); Serial.println(g_mqttTopic);
+      saveConfig();
+    }
 
   } else if (cmd == "pub" || cmd == "publish") {
     publishScan();
+
+  } else if (cmd == "config") {
+    printConfig();
+
+  } else if (cmd == "save") {
+    saveConfig();
+
+  } else if (cmd == "resetcfg") {
+    resetConfig();
 
   } else if (cmd == "status") {
     printStatus();
@@ -765,8 +866,11 @@ static void pollSerial() {
 
 void setup() {
   Serial.begin(115200);
-  while (!Serial) {
-    ; // Attente de l'ouverture du moniteur série (USB natif).
+  // Attente courte du moniteur série, MAIS avec délai maximal : sans cela,
+  // la carte alimentée sans ordinateur (mode autonome) ne démarrerait jamais.
+  unsigned long t0 = millis();
+  while (!Serial && millis() - t0 < 2000) {
+    delay(10);
   }
 
   // LED RGB intégrée (active à l'état bas) : éteinte au démarrage.
@@ -775,8 +879,11 @@ void setup() {
   pinMode(LED_BLUE,  OUTPUT);
 
   printBanner();
-  Serial.println("  Initialisation de la pile BLE...");
 
+  // Recharge la configuration persistée (WiFi, MQTT, topic, calib, auto...).
+  loadConfig();
+
+  Serial.println("  Initialisation de la pile BLE...");
   BLEDevice::init(DEVICE_NAME);
   ledOff();
   pBLEScan = BLEDevice::getScan();
@@ -784,6 +891,18 @@ void setup() {
   pBLEScan->setActiveScan(ACTIVE_SCAN);
   pBLEScan->setInterval(100);   // unités de 0,625 ms
   pBLEScan->setWindow(99);
+
+  // Reconnexion automatique si des identifiants sont mémorisés.
+  if (g_wifiSsid.length() > 0) {
+    Serial.println("  Configuration trouvee : reconnexion automatique...");
+    connectWifi(g_wifiSsid, g_wifiPass);
+    if (WiFi.status() == WL_CONNECTED && g_mqttHost.length() > 0) {
+      connectMqtt();
+    }
+  }
+  if (g_autoScan) {
+    Serial.println("  Scan automatique memorise : reprise (tapez 'auto off' pour arreter).");
+  }
 
   Serial.println("  Pret. Tapez 'help' pour la liste des commandes.");
   printHelp();
@@ -794,6 +913,10 @@ void loop() {
   if (g_autoScan && !g_identifyMode) {
     doScan(g_scanSeconds);
     listDevices(0);
+    // En scan automatique, publie aussi sur MQTT si un broker est configuré.
+    if (g_mqttHost.length() > 0) {
+      publishDeviceList();
+    }
   }
   if (g_mqtt.connected()) {
     g_mqtt.loop();   // entretient la connexion MQTT (keepalive)

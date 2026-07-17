@@ -40,7 +40,7 @@ un suivi clair même si le moniteur série n'affiche pas la frappe.
 | `scan [s]`      | Lance un scan de `s` secondes (défaut : durée courante).           |
 | `list [N]`      | Liste les `N` appareils au signal le plus fort. Sans `N` : tous.   |
 | `top N`         | Alias de `list N`.                                                 |
-| `auto [s]`      | Scan automatique en boucle toutes les `s` s. `auto off` pour arrêter. |
+| `auto [s]`      | Scan automatique en boucle toutes les `s` s (publie aussi sur MQTT si un broker est configuré). `auto off` pour arrêter. |
 | `calib [r] [n]` | Calibration distance : `r` = RSSI à 1 m (dBm), `n` = exposant.     |
 | `status`        | Affiche les réglages courants.                                     |
 | `clear`         | Vide la liste des périphériques.                                   |
@@ -50,6 +50,9 @@ un suivi clair même si le moniteur série n'affiche pas la frappe.
 | `mqtt <host> [port]` | Configure et connecte le broker MQTT (port 1883 par défaut). |
 | `topic [nom]`   | Change le topic de publication (défaut : nom de la carte).         |
 | `pub`           | Lance un scan et publie la liste des devices en JSON sur MQTT.     |
+| `config`        | Affiche la configuration mémorisée.                                |
+| `save`          | Force l'enregistrement de la configuration (auto après chaque changement). |
+| `resetcfg`      | Efface la configuration mémorisée.                                 |
 
 ## Exemple de session
 
@@ -190,6 +193,41 @@ mosquitto_sub -h 192.168.1.10 -p 1883 -t "NanoESP32-ID" -v
 > (coexistence). Tout fonctionne, mais un scan pendant une activité WiFi
 > intense peut être légèrement moins rapide.
 
+## Configuration persistante (fonctionnement autonome)
+
+La configuration est enregistrée dans la **mémoire non-volatile (NVS)** de
+l'ESP32 et **rechargée au démarrage**. La carte peut donc fonctionner de façon
+**autonome** : une fois configurée, il suffit de l'alimenter (chargeur USB, sans
+ordinateur) et elle se reconnecte au WiFi, au broker MQTT et reprend le scan
+automatique si celui-ci était activé.
+
+### Éléments mémorisés
+
+Identifiants WiFi, broker MQTT (host/port), topic, durée de scan, calibration
+distance et état du scan automatique.
+
+L'enregistrement est **automatique après chaque changement** (commandes `wifi`,
+`mqtt`, `topic`, `calib`, `auto`, `scan <s>`). Commandes dédiées :
+
+- `config` : affiche la configuration mémorisée (mot de passe masqué).
+- `save` : force un enregistrement.
+- `resetcfg` : efface la configuration (effet au prochain redémarrage).
+
+### Exemple : rendre la carte autonome
+
+```
+BLE> wifi MonReseau motdepasse
+BLE> mqtt 192.168.1.10 1883
+BLE> auto 30            (scan + publication toutes les 30 s)
+```
+
+Après ça, débranchez puis rebranchez la carte sur un simple chargeur : elle
+redémarre, se reconnecte et publie toute seule.
+
+> ⚠️ Le mot de passe WiFi est stocké **en clair** dans la NVS (non chiffré),
+> comme pour la plupart des projets ESP32. À garder à l'esprit si la carte peut
+> tomber entre d'autres mains.
+
 ## Informations affichées par périphérique
 
 - **Adresse** : adresse MAC BLE du périphérique.
@@ -246,3 +284,8 @@ commandes) :
 - `MON_CODE` : code secret d'identification (défaut : `aurelien`).
 - `DEVICE_NAME` : nom BLE annoncé + topic MQTT par défaut (`NanoESP32-ID`).
 - `g_mqttPort` : port MQTT (défaut : `1883`, sans TLS) — cf. `mqtt`.
+
+> Ces valeurs sont les **défauts à la compilation**. Une fois configurés en
+> direct via les commandes, les réglages sont mémorisés en NVS et priment au
+> démarrage (voir « Configuration persistante »). Utilisez `resetcfg` pour
+> revenir aux défauts.
