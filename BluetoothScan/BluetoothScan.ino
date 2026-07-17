@@ -5,6 +5,12 @@
  * Arduino Nano ESP32 (puce ESP32-S3), piloté par des commandes
  * envoyées via la liaison série USB.
  *
+ * Deux modes :
+ *   - SCAN (central)  : détecte les périphériques BLE alentour.
+ *   - IDENTIFY (péri.): la carte devient un périphérique BLE auquel votre
+ *                       iPhone peut se connecter pour s'identifier via un
+ *                       code secret (LED verte = identifié).
+ *
  * IMPORTANT : l'ESP32-S3 de l'Arduino Nano ESP32 ne supporte QUE le
  * Bluetooth Low Energy (BLE), pas le Bluetooth Classic. Ce sketch
  * utilise donc la pile BLE (bibliothèque "ESP32 BLE Arduino").
@@ -19,6 +25,9 @@
 #include <BLEDevice.h>
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
 #include <math.h>
 
 // ---------------------------------------------------------------------------
@@ -42,9 +51,32 @@ static bool  g_autoScan = false;
 static float g_rssiAt1m    = -59.0f;
 static float g_pathLoss    = 2.0f;
 
+// --- Mode identification (la carte devient un périphérique BLE) ------------
+
+// Nom sous lequel la carte s'annonce (visible depuis l'iPhone).
+#define DEVICE_NAME  "NanoESP32-ID"
+
+// Code secret à écrire depuis l'iPhone pour être identifié.
+// PERSONNALISEZ-LE ! (attention : la comparaison respecte la casse)
+#define MON_CODE     "aurelien"
+
+// UUID du service et des caractéristiques d'identification (128 bits).
+#define ID_SERVICE_UUID      "3db02920-b2a6-4d47-be1f-0f90ad62a48d"
+#define ID_CODE_CHAR_UUID    "3db02921-b2a6-4d47-be1f-0f90ad62a48d"  // écriture
+#define ID_STATUS_CHAR_UUID  "3db02922-b2a6-4d47-be1f-0f90ad62a48d"  // lecture/notif.
+
 // ---------------------------------------------------------------------------
 
 BLEScan* pBLEScan = nullptr;
+
+// Objets du mode identification.
+static BLEServer*         g_server     = nullptr;
+static BLECharacteristic* g_statusChar = nullptr;
+static bool g_identifyMode = false;   // mode identification actif ?
+static bool g_identified   = false;   // iPhone identifié avec le bon code ?
+
+// Déclarations anticipées (fonctions utilisées avant leur définition).
+static void printPrompt();
 
 // Informations mémorisées pour chaque périphérique détecté.
 struct DeviceInfo {
@@ -261,6 +293,134 @@ class ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
 };
 
 // ---------------------------------------------------------------------------
+// Mode identification : la carte devient un périphérique BLE.
+// ---------------------------------------------------------------------------
+
+// La LED RGB de l'Arduino Nano ESP32 est active à l'état BAS (LOW = allumé).
+static void ledOff() {
+  digitalWrite(LED_RED,   HIGH);
+  digitalWrite(LED_GREEN, HIGH);
+  digitalWrite(LED_BLUE,  HIGH);
+}
+static void ledColor(bool r, bool g, bool b) {
+  digitalWrite(LED_RED,   r ? LOW : HIGH);
+  digitalWrite(LED_GREEN, g ? LOW : HIGH);
+  digitalWrite(LED_BLUE,  b ? LOW : HIGH);
+}
+
+// Callbacks de connexion / déconnexion de l'iPhone.
+class ServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) override {
+    Serial.println();
+    Serial.println("  [i] iPhone connecte. En attente du code d'identification...");
+    g_identified = false;
+    ledColor(false, false, true);   // bleu = connecté, pas encore identifié
+    printPrompt();
+  }
+  void onDisconnect(BLEServer* pServer) override {
+    Serial.println();
+    Serial.println("  [i] iPhone deconnecte.");
+    g_identified = false;
+    ledOff();
+    if (g_identifyMode) {
+      pServer->startAdvertising();  // se ré-annonce pour une prochaine connexion
+    }
+    printPrompt();
+  }
+};
+
+// Callback appelé quand l'iPhone écrit dans la caractéristique "code".
+class CodeCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* pChar) override {
+    std::string raw = pChar->getValue();
+    String value = String(raw.c_str());
+    value.trim();
+
+    Serial.println();
+    if (value == MON_CODE) {
+      g_identified = true;
+      Serial.println("  ****************************************");
+      Serial.printf ("  *   Identifie : %s !\n", MON_CODE);
+      Serial.println("  *   (bienvenue)");
+      Serial.println("  ****************************************");
+      ledColor(false, true, false);   // vert = identifié
+
+      if (g_statusChar != nullptr) {
+        String msg = String("Bonjour ") + MON_CODE + " !";
+        g_statusChar->setValue(msg.c_str());
+        g_statusChar->notify();
+      }
+    } else {
+      Serial.print("  [x] Code incorrect recu : \"");
+      Serial.print(value);
+      Serial.println("\"");
+      ledColor(true, false, false);   // rouge = refusé
+
+      if (g_statusChar != nullptr) {
+        g_statusChar->setValue("Code incorrect");
+        g_statusChar->notify();
+      }
+    }
+    printPrompt();
+  }
+};
+
+// Démarre (ou reprend) le mode identification.
+static void startIdentifyMode() {
+  g_autoScan = false;  // on ne scanne pas en même temps
+
+  // Création unique du serveur GATT et de ses caractéristiques.
+  if (g_server == nullptr) {
+    g_server = BLEDevice::createServer();
+    g_server->setCallbacks(new ServerCallbacks());
+
+    BLEService* service = g_server->createService(ID_SERVICE_UUID);
+
+    // Caractéristique "code" : l'iPhone y écrit le code secret.
+    BLECharacteristic* codeChar = service->createCharacteristic(
+        ID_CODE_CHAR_UUID, BLECharacteristic::PROPERTY_WRITE);
+    codeChar->setCallbacks(new CodeCallbacks());
+
+    // Caractéristique "status" : message lisible + notification.
+    g_statusChar = service->createCharacteristic(
+        ID_STATUS_CHAR_UUID,
+        BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+    g_statusChar->addDescriptor(new BLE2902());
+    g_statusChar->setValue("En attente du code...");
+
+    service->start();
+
+    BLEAdvertising* adv = BLEDevice::getAdvertising();
+    adv->addServiceUUID(ID_SERVICE_UUID);
+    adv->setScanResponse(true);
+  }
+
+  g_identified   = false;
+  g_identifyMode = true;
+  ledOff();
+  BLEDevice::startAdvertising();
+
+  Serial.println();
+  Serial.println("  === MODE IDENTIFICATION ACTIF ===");
+  Serial.printf ("  La carte s'annonce en BLE sous le nom : %s\n", DEVICE_NAME);
+  Serial.println("  Sur l'iPhone (app nRF Connect ou LightBlue, gratuites) :");
+  Serial.printf ("    1. Se connecter au peripherique \"%s\".\n", DEVICE_NAME);
+  Serial.println("    2. Ouvrir le service d'identification.");
+  Serial.printf ("    3. Ecrire le code \"%s\" dans la caracteristique d'ecriture.\n", MON_CODE);
+  Serial.println("  LED : bleu=connecte, vert=identifie, rouge=code refuse.");
+  Serial.println("  Tapez 'stop' pour revenir au mode scan.");
+}
+
+// Arrête le mode identification (arrête l'annonce BLE).
+static void stopIdentifyMode() {
+  g_identifyMode = false;
+  g_identified   = false;
+  BLEDevice::stopAdvertising();
+  ledOff();
+  Serial.println("  Mode identification arrete. Retour au mode scan.");
+}
+
+// ---------------------------------------------------------------------------
 // Actions.
 // ---------------------------------------------------------------------------
 
@@ -283,8 +443,11 @@ static void printBanner() {
 
 // Affiche l'état courant des réglages.
 static void printStatus() {
-  Serial.printf("  Etat : duree scan=%ds | auto=%s | RSSI@1m=%.0f dBm | n=%.2f | %d en memoire\n",
-                g_scanSeconds, g_autoScan ? "ON" : "OFF",
+  const char* mode = g_identifyMode
+                       ? (g_identified ? "IDENTIFICATION (identifie)" : "IDENTIFICATION (attente)")
+                       : "SCAN";
+  Serial.printf("  Etat : mode=%s | duree scan=%ds | auto=%s | RSSI@1m=%.0f dBm | n=%.2f | %d en memoire\n",
+                mode, g_scanSeconds, g_autoScan ? "ON" : "OFF",
                 g_rssiAt1m, g_pathLoss, g_deviceCount);
 }
 
@@ -302,6 +465,10 @@ static void printHelp() {
   Serial.println("                    n = exposant d'attenuation. Sans arg : affiche.");
   Serial.println("  status            Affiche les reglages courants.");
   Serial.println("  clear             Vide la liste des peripheriques.");
+  Serial.println("  --- Mode identification (jumelage iPhone) ---");
+  Serial.println("  identify          Passe en peripherique BLE : l'iPhone se");
+  Serial.println("                    connecte et ecrit un code pour s'identifier.");
+  Serial.println("  stop              Quitte le mode identification.");
   Serial.println();
   printStatus();
   Serial.println();
@@ -342,16 +509,22 @@ static void handleCommand(String line) {
     printHelp();
 
   } else if (cmd == "scan") {
-    if (a1.length() > 0) g_scanSeconds = max(1, (int)a1.toInt());
-    doScan(g_scanSeconds);
-    listDevices(0);
+    if (g_identifyMode) {
+      Serial.println("Mode identification actif. Tapez 'stop' avant de scanner.");
+    } else {
+      if (a1.length() > 0) g_scanSeconds = max(1, (int)a1.toInt());
+      doScan(g_scanSeconds);
+      listDevices(0);
+    }
 
   } else if (cmd == "list" || cmd == "top") {
     int n = (a1.length() > 0) ? (int)a1.toInt() : 0;
     listDevices(n);
 
   } else if (cmd == "auto") {
-    if (a1 == "off" || a1 == "0") {
+    if (g_identifyMode) {
+      Serial.println("Mode identification actif. Tapez 'stop' d'abord.");
+    } else if (a1 == "off" || a1 == "0") {
       g_autoScan = false;
       Serial.println("Scan automatique : OFF.");
     } else {
@@ -365,6 +538,13 @@ static void handleCommand(String line) {
     if (a1.length() > 0) g_rssiAt1m = a1.toFloat();
     if (a2.length() > 0) g_pathLoss = a2.toFloat();
     Serial.printf("Calibration : RSSI@1m=%.0f dBm, n=%.2f\n", g_rssiAt1m, g_pathLoss);
+
+  } else if (cmd == "identify" || cmd == "pair" || cmd == "id") {
+    startIdentifyMode();
+
+  } else if (cmd == "stop") {
+    if (g_identifyMode) stopIdentifyMode();
+    else                Serial.println("Rien a arreter.");
 
   } else if (cmd == "status") {
     printStatus();
@@ -407,10 +587,16 @@ void setup() {
     ; // Attente de l'ouverture du moniteur série (USB natif).
   }
 
+  // LED RGB intégrée (active à l'état bas) : éteinte au démarrage.
+  pinMode(LED_RED,   OUTPUT);
+  pinMode(LED_GREEN, OUTPUT);
+  pinMode(LED_BLUE,  OUTPUT);
+
   printBanner();
   Serial.println("  Initialisation de la pile BLE...");
 
-  BLEDevice::init("");
+  BLEDevice::init(DEVICE_NAME);
+  ledOff();
   pBLEScan = BLEDevice::getScan();
   pBLEScan->setAdvertisedDeviceCallbacks(new ScanCallbacks());
   pBLEScan->setActiveScan(ACTIVE_SCAN);
@@ -423,7 +609,7 @@ void setup() {
 }
 
 void loop() {
-  if (g_autoScan) {
+  if (g_autoScan && !g_identifyMode) {
     doScan(g_scanSeconds);
     listDevices(0);
   }

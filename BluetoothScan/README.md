@@ -42,6 +42,8 @@ un suivi clair même si le moniteur série n'affiche pas la frappe.
 | `calib [r] [n]` | Calibration distance : `r` = RSSI à 1 m (dBm), `n` = exposant.     |
 | `status`        | Affiche les réglages courants.                                     |
 | `clear`         | Vide la liste des périphériques.                                   |
+| `identify`      | Passe en mode identification (jumelage iPhone). Alias : `pair`.    |
+| `stop`          | Quitte le mode identification, revient au mode scan.               |
 
 ## Exemple de session
 
@@ -72,6 +74,52 @@ BLE> top 1
 top 1
 ...
 ```
+
+## Mode identification (jumelage iPhone)
+
+Ce mode transforme la carte en **périphérique BLE** auquel votre iPhone se
+connecte pour s'identifier. C'est un « truc bidon » : quand le bon code est
+reçu, la carte affiche un message et **la LED RGB passe au vert**.
+
+> Comme iOS **randomise son adresse MAC**, on ne peut pas identifier un iPhone
+> de façon fiable par son adresse. On l'identifie donc par un **code secret**
+> que vous écrivez depuis le téléphone.
+
+### Étapes
+
+1. Dans le moniteur série, tapez `identify`.
+2. Sur l'iPhone, installez une app BLE générique gratuite :
+   **nRF Connect** (Nordic) ou **LightBlue** (Punch Through).
+3. Dans l'app, scannez puis connectez-vous au périphérique **`NanoESP32-ID`**.
+4. Ouvrez le service d'identification, trouvez la caractéristique
+   **en écriture**, et écrivez-y votre code (par défaut **`aurelien`**),
+   en **texte / UTF-8** (pas en hexadécimal).
+5. La carte affiche « Identifie ! » et passe au **vert**. La caractéristique
+   de statut renvoie « Bonjour ... ! » (lisible / notifiée).
+
+### Code couleur de la LED
+
+| Couleur | Signification                          |
+|---------|----------------------------------------|
+| éteinte | En attente d'une connexion             |
+| bleu    | iPhone connecté, code pas encore reçu  |
+| vert    | Identifié (bon code)                   |
+| rouge   | Code refusé                            |
+
+### Personnaliser le code
+
+Modifiez le `#define MON_CODE "aurelien"` en haut de `BluetoothScan.ino`
+(la comparaison respecte la casse). Vous pouvez aussi changer le nom annoncé
+via `#define DEVICE_NAME`.
+
+> **Astuce iOS** : iOS met en cache les services BLE. Si vous modifiez le
+> sketch puis re-téléversez, oubliez le périphérique / relancez le Bluetooth
+> sur l'iPhone pour éviter d'afficher d'anciens services.
+
+> Ce mode utilise une simple **connexion + écriture d'un code**, pas le
+> jumelage/bonding système d'iOS (avec code à 6 chiffres). C'est volontaire :
+> c'est plus simple et ça suffit pour « s'identifier ». Le bonding chiffré est
+> possible mais plus lourd — demandez si vous le voulez.
 
 ## Informations affichées par périphérique
 
@@ -126,3 +174,5 @@ commandes) :
 - `ACTIVE_SCAN` : scan actif pour récupérer le nom (défaut : activé).
 - `g_rssiAt1m` / `g_pathLoss` : calibration distance — cf. `calib`.
 - `MAX_DEVICES` : nombre maximum d'appareils mémorisés par scan (défaut : 64).
+- `MON_CODE` : code secret d'identification (défaut : `aurelien`).
+- `DEVICE_NAME` : nom BLE annoncé en mode identification (défaut : `NanoESP32-ID`).
