@@ -697,6 +697,8 @@ static void printHelp() {
   Serial.println("  stop              Quitte le mode identification.");
   Serial.println("  --- Reseau WiFi + MQTT ---");
   Serial.println("  wifi <ssid> <mdp> Connecte le WiFi. Sans arg : affiche l'etat/IP.");
+  Serial.println("                    SSID/mdp avec espaces : entre guillemets, ex.");
+  Serial.println("                    wifi \"Mon Reseau\" \"mon mot de passe\"");
   Serial.println("  mqtt <host> [port] Configure et connecte le broker (port 1883 par");
   Serial.println("                    defaut, sans TLS). Sans arg : affiche l'etat.");
   Serial.println("  topic [nom]       Change le topic (defaut : nom de la carte).");
@@ -716,6 +718,43 @@ static void printPrompt() {
   if (!g_autoScan) Serial.print("\nBLE> ");
 }
 
+// Analyse les arguments de la commande 'wifi' en autorisant les espaces via
+// des guillemets. Exemples acceptés :
+//   wifi MonReseau motdepasse
+//   wifi "Mon Reseau" motdepasse
+//   wifi "Mon Reseau" "mot de passe"
+// La ligne complète a déjà été trimée (pas d'espaces en début/fin).
+static void parseWifiArgs(const String& in, String& ssid, String& pass) {
+  ssid = "";
+  pass = "";
+  int i = 0;
+  const int n = in.length();
+
+  // --- SSID ---
+  if (i < n && in.charAt(i) == '"') {
+    int end = in.indexOf('"', i + 1);
+    if (end < 0) { ssid = in.substring(i + 1); return; }  // guillemet non fermé
+    ssid = in.substring(i + 1, end);
+    i = end + 1;
+  } else {
+    int sp = in.indexOf(' ', i);
+    if (sp < 0) { ssid = in.substring(i); return; }       // pas de mot de passe
+    ssid = in.substring(i, sp);
+    i = sp;
+  }
+
+  // Saute les espaces séparateurs.
+  while (i < n && in.charAt(i) == ' ') i++;
+
+  // --- Mot de passe (reste de la ligne, avec ou sans guillemets) ---
+  if (i < n && in.charAt(i) == '"') {
+    int end = in.indexOf('"', i + 1);
+    pass = (end < 0) ? in.substring(i + 1) : in.substring(i + 1, end);
+  } else {
+    pass = in.substring(i);  // la ligne étant trimée, pas d'espace superflu
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Analyse des commandes série.
 // ---------------------------------------------------------------------------
@@ -725,12 +764,13 @@ static void handleCommand(String line) {
   if (line.length() == 0) return;
 
   // Découpe "commande argument1 argument2".
-  String cmd = line, a1 = "", a2 = "";
+  String cmd = line, a1 = "", a2 = "", rawArgs = "";
   int sp1 = line.indexOf(' ');
   if (sp1 >= 0) {
     cmd = line.substring(0, sp1);
-    String rest = line.substring(sp1 + 1);
-    rest.trim();
+    rawArgs = line.substring(sp1 + 1);   // arguments bruts (espaces préservés)
+    rawArgs.trim();
+    String rest = rawArgs;
     int sp2 = rest.indexOf(' ');
     if (sp2 >= 0) {
       a1 = rest.substring(0, sp2);
@@ -787,10 +827,12 @@ static void handleCommand(String line) {
     else                Serial.println("Rien a arreter.");
 
   } else if (cmd == "wifi") {
-    if (a1.length() == 0) {
+    if (rawArgs.length() == 0) {
       printWifiStatus();
     } else {
-      connectWifi(a1, a2);   // a2 = mot de passe (peut contenir des espaces)
+      String ssid, pass;
+      parseWifiArgs(rawArgs, ssid, pass);   // SSID/mot de passe entre guillemets si espaces
+      connectWifi(ssid, pass);
       saveConfig();
     }
 

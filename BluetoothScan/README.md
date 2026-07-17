@@ -152,8 +152,11 @@ Publication sur le topic "capteurs/nano-esp32" (312 octets)...
   Publie avec succes.
 ```
 
-- `wifi <ssid> <mdp>` : le mot de passe peut contenir des espaces ; en revanche
-  le SSID ne doit pas en contenir (limite du parseur de commandes).
+- `wifi <ssid> <mdp>` : pour un SSID **ou** un mot de passe contenant des
+  espaces, entourez-les de **guillemets**. Exemples :
+  - `wifi MonReseau motdepasse`
+  - `wifi "Mon Reseau" motdepasse`
+  - `wifi "Mon Reseau" "mot de passe"`
 - `mqtt <host> [port]` : `host` = IP ou nom d'hôte du broker (ex. `test.mosquitto.org`).
 - Le **topic** par défaut est le nom de la carte (`NanoESP32-ID`), modifiable
   avec `topic`.
